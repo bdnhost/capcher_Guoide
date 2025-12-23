@@ -41,7 +41,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Handle start recording request
   if (message.type === "START_RECORD") {
     if (isRecording) {
-      sendResponse({ error: "Already recording" });
+      logger.warn("Already recording, stopping previous recording first");
+      // Force stop previous recording
+      stopRecordingFlow();
+      // Wait a bit for cleanup
+      setTimeout(() => {
+        startRecordingProcess(message.streamId, sendResponse);
+      }, 100);
       return true;
     }
     if (!message.streamId) {
@@ -130,21 +136,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "RECORDING_COMPLETE") {
     isRecording = false;
     isPaused = false;
-    clearInterval(timerInterval); // Stop timer
+    if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
+    accumulatedTime = 0;
     broadcastToTabs({ type: 'UPDATE_TIMER', time: '00:00' }); // Reset timer display
     saveRecording(message.url);
     chrome.runtime.sendMessage({ type: "RECORDING_STOPPED" });
     broadcastToTabs({ type: "RECORDING_STOPPED" });
-    closeOffscreenDocument();
+
+    // Close offscreen document after a delay to ensure cleanup
+    setTimeout(() => {
+      closeOffscreenDocument();
+    }, 100);
   }
 
   if (message.type === "RECORDING_ERROR") {
     isRecording = false;
     isPaused = false;
-    clearInterval(timerInterval); // Stop timer
+    if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
+    accumulatedTime = 0;
     broadcastToTabs({ type: 'UPDATE_TIMER', time: '00:00' }); // Reset timer display
     chrome.runtime.sendMessage({ type: "RECORDING_ERROR", error: message.error });
-    closeOffscreenDocument();
+
+    // Close offscreen document after a delay to ensure cleanup
+    setTimeout(() => {
+      closeOffscreenDocument();
+    }, 100);
   }
 });
 
@@ -160,6 +182,11 @@ function broadcastToTabs(msg) {
 
 async function startRecordingProcess(streamId, sendResponse) {
   try {
+    // Ensure we have a clean state
+    isRecording = false;
+    isPaused = false;
+
+    // Setup or reuse offscreen document
     await setupOffscreenDocument('offscreen.html');
 
     const settings = await chrome.storage.local.get(['videoQuality', 'audioSource']);
@@ -175,6 +202,8 @@ async function startRecordingProcess(streamId, sendResponse) {
     logger.info("Recording process started successfully");
   } catch (error) {
     logger.error("Recording process error:", error);
+    isRecording = false;
+    isPaused = false;
     sendResponse({ error: error.message });
   }
 }
@@ -187,17 +216,40 @@ async function stopRecordingFlow() {
 }
 
 async function setupOffscreenDocument(path) {
-  if (await chrome.offscreen.hasDocument()) return;
-  await chrome.offscreen.createDocument({
-    url: path,
-    reasons: ['USER_MEDIA'],
-    justification: 'Recording screen content',
-  });
+  try {
+    const hasDoc = await chrome.offscreen.hasDocument();
+    if (hasDoc) {
+      logger.debug("Offscreen document already exists");
+      return;
+    }
+
+    await chrome.offscreen.createDocument({
+      url: path,
+      reasons: ['USER_MEDIA'],
+      justification: 'Recording screen content',
+    });
+
+    logger.debug("Offscreen document created successfully");
+  } catch (error) {
+    logger.error("Failed to setup offscreen document:", error);
+    throw error;
+  }
 }
 
 async function closeOffscreenDocument() {
-  if (!(await chrome.offscreen.hasDocument())) return;
-  await chrome.offscreen.closeDocument();
+  try {
+    const hasDoc = await chrome.offscreen.hasDocument();
+    if (!hasDoc) {
+      logger.debug("No offscreen document to close");
+      return;
+    }
+
+    await chrome.offscreen.closeDocument();
+    logger.debug("Offscreen document closed successfully");
+  } catch (error) {
+    logger.error("Failed to close offscreen document:", error);
+    // Don't throw - closing is not critical
+  }
 }
 
 function saveRecording(url) {

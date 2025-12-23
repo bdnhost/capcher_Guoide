@@ -1,11 +1,16 @@
 // offscreen.js
 // Handles MediaRecorder for Manifest V3
 
+console.log('Offscreen script loaded');
+
 let recorder;
 let data = [];
+let currentStream = null;
 
 chrome.runtime.onMessage.addListener(async (message) => {
   if (message.target !== "offscreen") return;
+
+  console.log('Offscreen received message:', message.type);
 
   if (message.type === "START_RECORDING") {
     startRecording(message.streamId, message.settings);
@@ -13,21 +18,36 @@ chrome.runtime.onMessage.addListener(async (message) => {
     stopRecording();
   } else if (message.type === "PAUSE_RECORD") {
     if (recorder?.state === "recording") {
+      console.log('Pausing recorder');
       recorder.pause();
+    } else {
+      console.warn('Cannot pause - recorder state:', recorder?.state);
     }
   } else if (message.type === "RESUME_RECORD") {
     if (recorder?.state === "paused") {
+      console.log('Resuming recorder');
       recorder.resume();
+    } else {
+      console.warn('Cannot resume - recorder state:', recorder?.state);
     }
   }
 });
 
 async function startRecording(streamId, settings = {}) {
-  if (recorder?.state === "recording") {
-    throw new Error("Recorder already active.");
-  }
-
   try {
+    // Clean up any existing recorder first
+    if (recorder) {
+      // If recorder exists and is recording/paused, stop it first
+      if (recorder.state === "recording" || recorder.state === "paused") {
+        console.log("Stopping existing recorder before starting new one");
+        recorder.stop();
+      }
+      recorder = null;
+    }
+
+    // Clear data array for fresh recording
+    data = [];
+
     const quality = settings.videoQuality || 'medium';
     const audioSource = settings.audioSource || 'system';
 
@@ -53,6 +73,8 @@ async function startRecording(streamId, settings = {}) {
       videoConstraints.mandatory.maxFrameRate = 24;
     }
 
+    console.log('Requesting media stream with streamId:', streamId);
+
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: audioSource === 'system' || audioSource === 'both' ? {
         mandatory: {
@@ -62,6 +84,9 @@ async function startRecording(streamId, settings = {}) {
       } : false,
       video: videoConstraints
     });
+
+    console.log('Media stream obtained successfully');
+    currentStream = stream;
 
     // Handle microphone if needed
     if (audioSource === 'microphone' || audioSource === 'both') {
@@ -73,21 +98,31 @@ async function startRecording(streamId, settings = {}) {
       }
     }
 
-    // Add audio track if needed (handling system vs mic would be improved here)
+    // Check if MediaRecorder supports the requested codec
+    let mimeType = 'video/webm;codecs=vp9';
+    if (!MediaRecorder.isTypeSupported(mimeType)) {
+      console.warn('vp9 codec not supported, falling back to vp8');
+      mimeType = 'video/webm;codecs=vp8';
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        console.warn('vp8 codec not supported, using default');
+        mimeType = 'video/webm';
+      }
+    }
 
-    recorder = new MediaRecorder(stream, {
-      mimeType: 'video/webm;codecs=vp9'
-    });
+    recorder = new MediaRecorder(stream, { mimeType });
 
     recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
+      if (event.data && event.data.size > 0) {
         data.push(event.data);
       }
     };
 
     recorder.onstop = () => {
+      console.log('Recorder stopped, creating blob from', data.length, 'chunks');
       const blob = new Blob(data, { type: "video/webm" });
       const url = URL.createObjectURL(blob);
+
+      console.log('Recording complete, blob size:', blob.size, 'bytes');
 
       // Send the result back to background script
       chrome.runtime.sendMessage({
@@ -97,11 +132,30 @@ async function startRecording(streamId, settings = {}) {
       });
 
       // Clean up
-      stream.getTracks().forEach(t => t.stop());
+      if (currentStream) {
+        currentStream.getTracks().forEach(t => {
+          console.log('Stopping track:', t.kind);
+          t.stop();
+        });
+        currentStream = null;
+      }
       data = [];
+      recorder = null;
     };
 
+    recorder.onerror = (event) => {
+      console.error("MediaRecorder error:", event.error);
+      chrome.runtime.sendMessage({
+        type: "RECORDING_ERROR",
+        error: event.error?.message || "Unknown recording error",
+        target: "background"
+      });
+    };
+
+    console.log('Starting recorder with mimeType:', mimeType);
     recorder.start(1000);
+
+    console.log('Recorder state after start:', recorder.state);
 
     // Notify background that we successfully started
     chrome.runtime.sendMessage({
@@ -120,7 +174,12 @@ async function startRecording(streamId, settings = {}) {
 }
 
 function stopRecording() {
+  console.log('stopRecording called, recorder state:', recorder?.state);
+
   if (recorder?.state === "recording" || recorder?.state === "paused") {
+    console.log('Stopping recorder');
     recorder.stop();
+  } else {
+    console.warn('Cannot stop - invalid recorder state:', recorder?.state);
   }
 }
