@@ -1,11 +1,16 @@
 // offscreen.js
 // Handles MediaRecorder for Manifest V3
 
-let recorder;
-let data = [];
+console.log('Offscreen script loaded');
 
-chrome.runtime.onMessage.addListener(async (message) => {
+let recorder = null;
+let data = [];
+let currentStream = null;
+
+chrome.runtime.onMessage.addListener((message) => {
   if (message.target !== "offscreen") return;
+
+  console.log('Offscreen received message:', message.type);
 
   if (message.type === "START_RECORDING") {
     startRecording(message.streamId, message.settings);
@@ -13,81 +18,113 @@ chrome.runtime.onMessage.addListener(async (message) => {
     stopRecording();
   } else if (message.type === "PAUSE_RECORD") {
     if (recorder?.state === "recording") {
+      console.log('Pausing recorder');
       recorder.pause();
+    } else {
+      console.warn('Cannot pause - recorder state:', recorder?.state);
     }
   } else if (message.type === "RESUME_RECORD") {
     if (recorder?.state === "paused") {
+      console.log('Resuming recorder');
       recorder.resume();
+    } else {
+      console.warn('Cannot resume - recorder state:', recorder?.state);
     }
   }
 });
 
 async function startRecording(streamId, settings = {}) {
-  if (recorder?.state === "recording") {
-    throw new Error("Recorder already active.");
-  }
+  console.log('startRecording called with streamId:', streamId);
 
   try {
-    const quality = settings.videoQuality || 'medium';
-    const audioSource = settings.audioSource || 'system';
-
-    const videoConstraints = {
-      mandatory: {
-        chromeMediaSource: 'desktop',
-        chromeMediaSourceId: streamId
+    // Clean up any existing recorder first
+    if (recorder) {
+      console.log('Cleaning up existing recorder, state:', recorder.state);
+      if (recorder.state === "recording" || recorder.state === "paused") {
+        recorder.stop();
+        // Wait for stop to complete
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
-    };
-
-    // Apply quality constraints
-    if (quality === 'high') {
-      videoConstraints.mandatory.maxWidth = 1920;
-      videoConstraints.mandatory.maxHeight = 1080;
-      videoConstraints.mandatory.maxFrameRate = 30;
-    } else if (quality === 'medium') {
-      videoConstraints.mandatory.maxWidth = 1280;
-      videoConstraints.mandatory.maxHeight = 720;
-      videoConstraints.mandatory.maxFrameRate = 30;
-    } else {
-      videoConstraints.mandatory.maxWidth = 854;
-      videoConstraints.mandatory.maxHeight = 480;
-      videoConstraints.mandatory.maxFrameRate = 24;
+      recorder = null;
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: audioSource === 'system' || audioSource === 'both' ? {
+    // Clean up existing stream
+    if (currentStream) {
+      console.log('Cleaning up existing stream');
+      currentStream.getTracks().forEach(t => t.stop());
+      currentStream = null;
+    }
+
+    // Clear data array for fresh recording
+    data = [];
+
+    const quality = settings.videoQuality || 'medium';
+    const audioSource = settings.audioSource || 'none';
+
+    console.log('Quality:', quality, 'Audio:', audioSource);
+
+    // Simple video-only constraints
+    const constraints = {
+      video: {
         mandatory: {
           chromeMediaSource: 'desktop',
-          chromeMediaSourceId: streamId
+          chromeMediaSourceId: streamId,
+          maxWidth: 1280,
+          maxHeight: 720,
+          maxFrameRate: 30
         }
-      } : false,
-      video: videoConstraints
-    });
+      },
+      audio: false // Start with no audio for simplicity
+    };
 
-    // Handle microphone if needed
-    if (audioSource === 'microphone' || audioSource === 'both') {
-      try {
-        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        micStream.getAudioTracks().forEach(track => stream.addTrack(track));
-      } catch (micErr) {
-        console.warn("Microphone access denied or failed", micErr);
-      }
-    }
+    console.log('Requesting media stream...');
 
-    // Add audio track if needed (handling system vs mic would be improved here)
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
 
-    recorder = new MediaRecorder(stream, {
-      mimeType: 'video/webm;codecs=vp9'
-    });
+    console.log('Media stream obtained, tracks:', stream.getTracks().length);
+    currentStream = stream;
+
+    // Use simple mimeType
+    const mimeType = 'video/webm';
+    console.log('Using mimeType:', mimeType);
+
+    recorder = new MediaRecorder(stream, { mimeType });
+
+    console.log('MediaRecorder created, initial state:', recorder.state);
 
     recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
+      if (event.data && event.data.size > 0) {
+        console.log('Data available, size:', event.data.size);
         data.push(event.data);
       }
     };
 
+    recorder.onstart = () => {
+      console.log('MediaRecorder started!');
+      // Notify background that we successfully started
+      chrome.runtime.sendMessage({
+        type: "RECORDING_STARTED",
+        target: "background"
+      });
+    };
+
     recorder.onstop = () => {
+      console.log('Recorder stopped, creating blob from', data.length, 'chunks');
+
+      if (data.length === 0) {
+        console.error('No data chunks recorded!');
+        chrome.runtime.sendMessage({
+          type: "RECORDING_ERROR",
+          error: "No data was recorded",
+          target: "background"
+        });
+        return;
+      }
+
       const blob = new Blob(data, { type: "video/webm" });
       const url = URL.createObjectURL(blob);
+
+      console.log('Recording complete, blob size:', blob.size, 'bytes');
 
       // Send the result back to background script
       chrome.runtime.sendMessage({
@@ -97,30 +134,54 @@ async function startRecording(streamId, settings = {}) {
       });
 
       // Clean up
-      stream.getTracks().forEach(t => t.stop());
+      if (currentStream) {
+        currentStream.getTracks().forEach(t => {
+          console.log('Stopping track:', t.kind);
+          t.stop();
+        });
+        currentStream = null;
+      }
       data = [];
+      recorder = null;
     };
 
-    recorder.start(1000);
+    recorder.onerror = (event) => {
+      console.error("MediaRecorder error:", event);
+      const errorMsg = event.error?.message || event.error?.name || "Unknown recording error";
+      chrome.runtime.sendMessage({
+        type: "RECORDING_ERROR",
+        error: errorMsg,
+        target: "background"
+      });
+    };
 
-    // Notify background that we successfully started
-    chrome.runtime.sendMessage({
-      type: "RECORDING_STARTED",
-      target: "background"
-    });
+    console.log('Starting recorder...');
+    recorder.start(1000); // Collect data every second
+
+    console.log('Recorder state after start():', recorder.state);
 
   } catch (err) {
-    console.error("Offscreen startRecording failed:", err);
+    console.error("startRecording failed:", err);
     chrome.runtime.sendMessage({
       type: "RECORDING_ERROR",
-      error: err.message,
+      error: err.message || err.toString(),
       target: "background"
     });
   }
 }
 
 function stopRecording() {
-  if (recorder?.state === "recording" || recorder?.state === "paused") {
+  console.log('stopRecording called, recorder state:', recorder?.state);
+
+  if (!recorder) {
+    console.warn('No recorder to stop');
+    return;
+  }
+
+  if (recorder.state === "recording" || recorder.state === "paused") {
+    console.log('Stopping recorder');
     recorder.stop();
+  } else {
+    console.warn('Cannot stop - invalid recorder state:', recorder.state);
   }
 }

@@ -41,7 +41,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Handle start recording request
   if (message.type === "START_RECORD") {
     if (isRecording) {
-      sendResponse({ error: "Already recording" });
+      logger.warn("Already recording, stopping previous recording first");
+      // Force stop previous recording
+      stopRecordingFlow();
+      // Wait a bit for cleanup
+      setTimeout(() => {
+        startRecordingProcess(message.streamId, sendResponse);
+      }, 100);
       return true;
     }
     if (!message.streamId) {
@@ -112,6 +118,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // Handle recording lifecycle messages from offscreen
   if (message.type === "RECORDING_STARTED") {
+    logger.info("Recording started successfully!");
     isRecording = true;
     isPaused = false;
     accumulatedTime = 0;
@@ -123,28 +130,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const seconds = (elapsedSec % 60).toString().padStart(2, '0');
       broadcastToTabs({ type: 'UPDATE_TIMER', time: `${minutes}:${seconds}` });
     }, 1000);
-    chrome.runtime.sendMessage({ type: "RECORDING_STARTED" });
-    broadcastToTabs({ type: "RECORDING_STARTED" });
+
+    // Don't send these messages to avoid confusion
+    // chrome.runtime.sendMessage({ type: "RECORDING_STARTED" });
+    // broadcastToTabs({ type: "RECORDING_STARTED" });
   }
 
   if (message.type === "RECORDING_COMPLETE") {
+    logger.info("Recording completed successfully!");
     isRecording = false;
     isPaused = false;
-    clearInterval(timerInterval); // Stop timer
+    if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
+    accumulatedTime = 0;
     broadcastToTabs({ type: 'UPDATE_TIMER', time: '00:00' }); // Reset timer display
     saveRecording(message.url);
-    chrome.runtime.sendMessage({ type: "RECORDING_STOPPED" });
-    broadcastToTabs({ type: "RECORDING_STOPPED" });
-    closeOffscreenDocument();
+
+    // Close offscreen document after a delay to ensure cleanup
+    setTimeout(() => {
+      closeOffscreenDocument();
+    }, 500);
   }
 
   if (message.type === "RECORDING_ERROR") {
+    logger.error("Recording error:", message.error);
     isRecording = false;
     isPaused = false;
-    clearInterval(timerInterval); // Stop timer
+    if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
+    accumulatedTime = 0;
     broadcastToTabs({ type: 'UPDATE_TIMER', time: '00:00' }); // Reset timer display
-    chrome.runtime.sendMessage({ type: "RECORDING_ERROR", error: message.error });
-    closeOffscreenDocument();
+
+    // Close offscreen document after a delay to ensure cleanup
+    setTimeout(() => {
+      closeOffscreenDocument();
+    }, 500);
   }
 });
 
@@ -160,10 +184,20 @@ function broadcastToTabs(msg) {
 
 async function startRecordingProcess(streamId, sendResponse) {
   try {
+    logger.info("Starting recording process with streamId:", streamId);
+
+    // Ensure we have a clean state
+    isRecording = false;
+    isPaused = false;
+
+    // Setup or reuse offscreen document
     await setupOffscreenDocument('offscreen.html');
 
     const settings = await chrome.storage.local.get(['videoQuality', 'audioSource']);
+    logger.debug("Settings loaded:", settings);
 
+    // Send message to offscreen to start recording
+    logger.debug("Sending START_RECORDING message to offscreen");
     chrome.runtime.sendMessage({
       type: "START_RECORDING",
       target: "offscreen",
@@ -172,10 +206,15 @@ async function startRecordingProcess(streamId, sendResponse) {
     });
 
     sendResponse({ success: true });
-    logger.info("Recording process started successfully");
+    logger.info("Recording process initialization complete");
   } catch (error) {
     logger.error("Recording process error:", error);
+    isRecording = false;
+    isPaused = false;
     sendResponse({ error: error.message });
+
+    // Close offscreen on error
+    setTimeout(() => closeOffscreenDocument(), 100);
   }
 }
 
@@ -187,17 +226,40 @@ async function stopRecordingFlow() {
 }
 
 async function setupOffscreenDocument(path) {
-  if (await chrome.offscreen.hasDocument()) return;
-  await chrome.offscreen.createDocument({
-    url: path,
-    reasons: ['USER_MEDIA'],
-    justification: 'Recording screen content',
-  });
+  try {
+    const hasDoc = await chrome.offscreen.hasDocument();
+    if (hasDoc) {
+      logger.debug("Offscreen document already exists");
+      return;
+    }
+
+    await chrome.offscreen.createDocument({
+      url: path,
+      reasons: ['USER_MEDIA'],
+      justification: 'Recording screen content',
+    });
+
+    logger.debug("Offscreen document created successfully");
+  } catch (error) {
+    logger.error("Failed to setup offscreen document:", error);
+    throw error;
+  }
 }
 
 async function closeOffscreenDocument() {
-  if (!(await chrome.offscreen.hasDocument())) return;
-  await chrome.offscreen.closeDocument();
+  try {
+    const hasDoc = await chrome.offscreen.hasDocument();
+    if (!hasDoc) {
+      logger.debug("No offscreen document to close");
+      return;
+    }
+
+    await chrome.offscreen.closeDocument();
+    logger.debug("Offscreen document closed successfully");
+  } catch (error) {
+    logger.error("Failed to close offscreen document:", error);
+    // Don't throw - closing is not critical
+  }
 }
 
 function saveRecording(url) {
