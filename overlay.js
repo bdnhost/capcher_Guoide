@@ -23,17 +23,20 @@ class DrawingOverlay {
     this.init();
   }
 
-  init() {
-    // Load saved settings
-    chrome.storage.local.get(["tool", "color", "lineWidth"], (res) => {
-      if (res.tool) this.tool = res.tool;
-      if (res.color) this.color = res.color;
-      if (res.lineWidth) this.lineWidth = res.lineWidth;
-      this.updatePointerEvents();
+  async init() {
+    // Load saved settings synchronously to avoid race conditions
+    const settings = await new Promise((resolve) => {
+      chrome.storage.local.get(["tool", "color", "lineWidth"], (res) => {
+        resolve(res);
+      });
     });
 
+    if (settings.tool) this.tool = settings.tool;
+    if (settings.color) this.color = settings.color;
+    if (settings.lineWidth) this.lineWidth = settings.lineWidth;
+
     // Load AI settings
-    this.loadAISettings();
+    await this.loadAISettings();
 
     // Listen for tool changes
     chrome.storage.onChanged.addListener((changes) => {
@@ -55,6 +58,9 @@ class DrawingOverlay {
     // Create canvas overlay
     this.createCanvas();
 
+    // Update pointer events after settings are loaded
+    this.updatePointerEvents();
+
     // Set up event listeners
     this.setupEventListeners();
 
@@ -73,14 +79,17 @@ class DrawingOverlay {
     console.log("Drawing overlay initialized with AI support");
   }
 
-  loadAISettings() {
-    chrome.storage.local.get([
-      'enableAI', 'deepseekApiKey', 'aiModel', 'aiTextGeneration'
-    ], (result) => {
-      if (result.enableAI !== undefined) this.aiSettings.enabled = result.enableAI;
-      if (result.deepseekApiKey) this.aiSettings.apiKey = result.deepseekApiKey;
-      if (result.aiModel) this.aiSettings.model = result.aiModel;
-      if (result.aiTextGeneration !== undefined) this.aiSettings.aiTextGeneration = result.aiTextGeneration;
+  async loadAISettings() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get([
+        'enableAI', 'deepseekApiKey', 'aiModel', 'aiTextGeneration'
+      ], (result) => {
+        if (result.enableAI !== undefined) this.aiSettings.enabled = result.enableAI;
+        if (result.deepseekApiKey) this.aiSettings.apiKey = result.deepseekApiKey;
+        if (result.aiModel) this.aiSettings.model = result.aiModel;
+        if (result.aiTextGeneration !== undefined) this.aiSettings.aiTextGeneration = result.aiTextGeneration;
+        resolve();
+      });
     });
   }
 
@@ -88,6 +97,11 @@ class DrawingOverlay {
     // Remove existing canvas if any
     const existingCanvas = document.getElementById("ai-recorder-overlay");
     if (existingCanvas) {
+      // Properly cleanup context before removal
+      const oldCtx = existingCanvas.getContext("2d");
+      if (oldCtx) {
+        oldCtx.clearRect(0, 0, existingCanvas.width, existingCanvas.height);
+      }
       existingCanvas.remove();
     }
 
@@ -97,13 +111,16 @@ class DrawingOverlay {
     this.canvas.style.position = "fixed";
     this.canvas.style.top = "0";
     this.canvas.style.left = "0";
-    this.canvas.style.zIndex = "999999";
+    this.canvas.style.zIndex = "2147483647"; // Maximum safe z-index
     this.canvas.style.pointerEvents = "none";
     this.canvas.width = window.innerWidth;
     this.canvas.height = window.innerHeight;
 
     document.body.appendChild(this.canvas);
-    this.ctx = this.canvas.getContext("2d");
+    this.ctx = this.canvas.getContext("2d", {
+      alpha: true,
+      willReadFrequently: true // Optimize for frequent getImageData calls
+    });
 
     // Set initial pointer events based on tool
     this.updatePointerEvents();
@@ -129,18 +146,28 @@ class DrawingOverlay {
 
     // Touch events for mobile support
     document.addEventListener("touchstart", (e) => {
-      e.preventDefault();
-      const touch = e.touches[0];
-      this.startDrawing({ clientX: touch.clientX, clientY: touch.clientY });
-    });
+      // Only prevent default if we're in drawing mode
+      if (this.tool !== "cursor") {
+        e.preventDefault();
+        const touch = e.touches[0];
+        this.startDrawing({ clientX: touch.clientX, clientY: touch.clientY });
+      }
+    }, { passive: false });
 
     document.addEventListener("touchmove", (e) => {
-      e.preventDefault();
-      const touch = e.touches[0];
-      this.draw({ clientX: touch.clientX, clientY: touch.clientY });
-    });
+      // Only prevent default if we're actively drawing
+      if (this.isDrawing) {
+        e.preventDefault();
+        const touch = e.touches[0];
+        this.draw({ clientX: touch.clientX, clientY: touch.clientY });
+      }
+    }, { passive: false });
 
-    document.addEventListener("touchend", () => this.stopDrawing());
+    document.addEventListener("touchend", () => {
+      if (this.isDrawing) {
+        this.stopDrawing();
+      }
+    });
 
     // Click events for shape tools
     document.addEventListener("click", (e) => this.handleClick(e));
@@ -208,6 +235,9 @@ class DrawingOverlay {
       this.isDrawing = true;
       [this.lastX, this.lastY] = [e.clientX, e.clientY];
 
+      // Save current context state
+      this.ctx.save();
+
       this.ctx.beginPath();
       this.ctx.moveTo(this.lastX, this.lastY);
 
@@ -236,11 +266,18 @@ class DrawingOverlay {
   stopDrawing() {
     if (this.isDrawing) {
       this.isDrawing = false;
+
+      // Restore context state to reset globalAlpha and other properties
+      this.ctx.restore();
+
       this.saveToHistory();
     }
   }
 
   handleClick(e) {
+    // Save context state before drawing shapes
+    this.ctx.save();
+
     this.ctx.strokeStyle = this.color;
     this.ctx.lineWidth = this.lineWidth;
     this.ctx.globalAlpha = 1.0;
@@ -250,20 +287,24 @@ class DrawingOverlay {
         this.ctx.beginPath();
         this.ctx.arc(e.clientX, e.clientY, 40, 0, Math.PI * 2);
         this.ctx.stroke();
+        this.ctx.restore();
         this.saveToHistory();
         break;
 
       case "rectangle":
         this.ctx.strokeRect(e.clientX - 50, e.clientY - 30, 100, 60);
+        this.ctx.restore();
         this.saveToHistory();
         break;
 
       case "arrow":
         this.drawArrow(e.clientX, e.clientY, e.clientX + 80, e.clientY + 10);
+        this.ctx.restore();
         this.saveToHistory();
         break;
 
       case "text":
+        this.ctx.restore(); // Restore before async text operation
         this.addText(e.clientX, e.clientY);
         break;
     }
@@ -273,24 +314,30 @@ class DrawingOverlay {
     const headLength = 15;
     const angle = Math.atan2(toY - fromY, toX - fromX);
 
-    // Draw line
+    // Draw main arrow line
     this.ctx.beginPath();
     this.ctx.moveTo(fromX, fromY);
     this.ctx.lineTo(toX, toY);
     this.ctx.stroke();
 
-    // Draw arrow head
+    // Draw arrow head as a filled triangle for better visibility
     this.ctx.beginPath();
     this.ctx.moveTo(toX, toY);
     this.ctx.lineTo(
       toX - headLength * Math.cos(angle - Math.PI / 6),
       toY - headLength * Math.sin(angle - Math.PI / 6)
     );
-    this.ctx.moveTo(toX, toY);
     this.ctx.lineTo(
       toX - headLength * Math.cos(angle + Math.PI / 6),
       toY - headLength * Math.sin(angle + Math.PI / 6)
     );
+    this.ctx.closePath();
+
+    // Fill the arrow head
+    this.ctx.fillStyle = this.color;
+    this.ctx.fill();
+
+    // Also stroke it for consistency
     this.ctx.stroke();
   }
 
@@ -328,18 +375,43 @@ class DrawingOverlay {
   }
 
   drawText(x, y, text) {
+    // Save context state
+    this.ctx.save();
+
     this.ctx.font = "16px Arial";
     this.ctx.fillStyle = this.color;
 
-    // Add text background for better visibility
-    const textWidth = this.ctx.measureText(text).width;
-    const padding = 4;
-    this.ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-    this.ctx.fillRect(x - padding, y - 16 - padding, textWidth + padding * 2, 20 + padding * 2);
+    // Handle multi-line text
+    const lines = text.split('\n');
+    const lineHeight = 20;
+    const padding = 6;
 
-    // Draw text
+    // Calculate dimensions for all lines
+    let maxWidth = 0;
+    lines.forEach(line => {
+      const width = this.ctx.measureText(line).width;
+      if (width > maxWidth) maxWidth = width;
+    });
+
+    const totalHeight = lines.length * lineHeight;
+
+    // Draw background for better visibility
+    this.ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+    this.ctx.fillRect(
+      x - padding,
+      y - lineHeight + 4 - padding,
+      maxWidth + padding * 2,
+      totalHeight + padding * 2
+    );
+
+    // Draw each line of text
     this.ctx.fillStyle = this.color;
-    this.ctx.fillText(text, x, y);
+    lines.forEach((line, index) => {
+      this.ctx.fillText(line, x, y + (index * lineHeight));
+    });
+
+    // Restore context state
+    this.ctx.restore();
   }
 
   showLoadingIndicator(x, y) {
@@ -362,8 +434,11 @@ class DrawingOverlay {
   }
 
   removeLoadingIndicator() {
-    if (this.loadingIndicator && this.loadingIndicator.parentNode) {
-      this.loadingIndicator.parentNode.removeChild(this.loadingIndicator);
+    if (this.loadingIndicator) {
+      // Check if element exists in DOM before removal
+      if (document.body.contains(this.loadingIndicator)) {
+        document.body.removeChild(this.loadingIndicator);
+      }
       this.loadingIndicator = null;
     }
   }
@@ -436,9 +511,17 @@ class DrawingOverlay {
   }
 
   clearCanvas() {
+    // Clear the canvas
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+    // Free memory by clearing history
     this.drawingHistory = [];
     this.historyIndex = -1;
+
+    // Force garbage collection hint
+    if (typeof window !== 'undefined' && window.gc) {
+      window.gc();
+    }
   }
 
   undo() {
@@ -464,31 +547,58 @@ class DrawingOverlay {
     this.drawingHistory.push(imageData);
     this.historyIndex++;
 
-    // Limit history size
-    if (this.drawingHistory.length > 50) {
-      this.drawingHistory.shift();
-      this.historyIndex--;
+    // Limit history size to reduce memory usage (reduced from 50 to 20)
+    const maxHistorySize = 20;
+    if (this.drawingHistory.length > maxHistorySize) {
+      // Remove oldest entries
+      const removeCount = this.drawingHistory.length - maxHistorySize;
+      this.drawingHistory.splice(0, removeCount);
+      this.historyIndex -= removeCount;
+    }
+
+    // Log memory usage in debug mode
+    if (this.drawingHistory.length % 5 === 0) {
+      const memoryMB = (this.canvas.width * this.canvas.height * 4 * this.drawingHistory.length) / (1024 * 1024);
+      console.debug(`Drawing history: ${this.drawingHistory.length} states, ~${memoryMB.toFixed(2)}MB`);
     }
   }
 
   redrawFromHistory() {
+    // Clear the entire canvas first
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-    for (let i = 0; i <= this.historyIndex; i++) {
-      this.ctx.putImageData(this.drawingHistory[i], 0, 0);
+    // Restore the correct history state (no loop needed - just the current state)
+    if (this.historyIndex >= 0 && this.drawingHistory[this.historyIndex]) {
+      this.ctx.putImageData(this.drawingHistory[this.historyIndex], 0, 0);
     }
   }
 
   handleResize() {
-    // Save current drawing
-    const currentImage = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+    // Save current drawing to a temporary canvas
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = this.canvas.width;
+    tempCanvas.height = this.canvas.height;
+    const tempCtx = tempCanvas.getContext('2d');
+    tempCtx.drawImage(this.canvas, 0, 0);
 
-    // Resize canvas
+    // Store old dimensions
+    const oldWidth = this.canvas.width;
+    const oldHeight = this.canvas.height;
+
+    // Resize canvas to new dimensions
     this.canvas.width = window.innerWidth;
     this.canvas.height = window.innerHeight;
 
-    // Restore drawing
-    this.ctx.putImageData(currentImage, 0, 0);
+    // Restore drawing styles after resize (canvas resize resets them)
+    this.ctx.lineCap = "round";
+    this.ctx.lineJoin = "round";
+
+    // Restore drawing from temporary canvas
+    this.ctx.drawImage(tempCanvas, 0, 0);
+
+    // Clear temporary canvas
+    tempCanvas.width = 0;
+    tempCanvas.height = 0;
   }
 
   handleMessage(msg) {
@@ -547,20 +657,24 @@ class DrawingOverlay {
     this.recIndicator.style.top = "20px";
     this.recIndicator.style.right = "20px";
     this.recIndicator.style.padding = "8px 16px";
-    this.recIndicator.style.background = "rgba(239, 68, 68, 0.8)";
+    this.recIndicator.style.background = "rgba(239, 68, 68, 0.9)";
     this.recIndicator.style.color = "white";
     this.recIndicator.style.borderRadius = "20px";
     this.recIndicator.style.fontSize = "12px";
     this.recIndicator.style.fontWeight = "bold";
-    this.recIndicator.style.zIndex = "1000000";
+    this.recIndicator.style.zIndex = "2147483644";
     this.recIndicator.style.display = "flex";
     this.recIndicator.style.alignItems = "center";
     this.recIndicator.style.gap = "8px";
     this.recIndicator.innerHTML = '<span style="width:10px;height:10px;background:white;border-radius:50%;animation:pulse-rec 1s infinite"></span> REC';
 
-    const style = document.createElement("style");
-    style.innerHTML = "@keyframes pulse-rec { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }";
-    document.head.appendChild(style);
+    // Only add animation style if not already present
+    if (!document.getElementById('rec-pulse-animation')) {
+      const style = document.createElement("style");
+      style.id = 'rec-pulse-animation';
+      style.innerHTML = "@keyframes pulse-rec { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }";
+      document.head.appendChild(style);
+    }
 
     document.body.appendChild(this.recIndicator);
   }
@@ -589,7 +703,7 @@ class DrawingOverlay {
       border-radius: 20px;
       color: white;
       padding: 20px;
-      z-index: 1000001;
+      z-index: 2147483645;
       display: none;
       flex-direction: column;
       gap: 15px;
@@ -714,12 +828,12 @@ class DrawingOverlay {
       bottom: 30px;
       left: 50%;
       transform: translateX(-50%);
-      background: rgba(30, 41, 59, 0.9);
+      background: rgba(30, 41, 59, 0.95);
       backdrop-filter: blur(10px);
       border: 1px solid rgba(255, 255, 255, 0.1);
       border-radius: 16px;
       padding: 10px 20px;
-      z-index: 1000002;
+      z-index: 2147483646;
       display: none;
       align-items: center;
       gap: 12px;
@@ -811,13 +925,64 @@ class DrawingOverlay {
     const timerEl = this.toolbar?.querySelector("#toolbar-timer");
     if (timerEl) timerEl.textContent = elapsedStr;
   }
+
+  // Cleanup method to free resources
+  destroy() {
+    // Clear canvas and free memory
+    if (this.canvas) {
+      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      this.canvas.remove();
+      this.canvas = null;
+      this.ctx = null;
+    }
+
+    // Clear drawing history
+    this.drawingHistory = [];
+    this.historyIndex = -1;
+
+    // Remove overlays
+    if (this.toolbar) {
+      this.toolbar.remove();
+      this.toolbar = null;
+    }
+
+    if (this.aiPanel) {
+      this.aiPanel.remove();
+      this.aiPanel = null;
+    }
+
+    if (this.recIndicator) {
+      this.recIndicator.remove();
+      this.recIndicator = null;
+    }
+
+    if (this.loadingIndicator) {
+      this.removeLoadingIndicator();
+    }
+
+    // Stop AI assistant
+    if (this.aiInterval) {
+      clearInterval(this.aiInterval);
+      this.aiInterval = null;
+    }
+
+    console.log("Drawing overlay destroyed and resources freed");
+  }
 }
 
 // Initialize the overlay when the page loads
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", () => {
+    // Clean up existing instance if any
+    if (window.drawingOverlay) {
+      window.drawingOverlay.destroy();
+    }
     window.drawingOverlay = new DrawingOverlay();
   });
 } else {
+  // Clean up existing instance if any
+  if (window.drawingOverlay) {
+    window.drawingOverlay.destroy();
+  }
   window.drawingOverlay = new DrawingOverlay();
 }
