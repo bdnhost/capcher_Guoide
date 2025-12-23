@@ -2,8 +2,15 @@
 <html>
 <head>
   <title>Offscreen Recording</title>
-  <script src="offscreen.js"></script>
 </head>
 <body>
+  <h1 style="display:none">Offscreen Document</h1>
+  <script>
+    console.log('=== OFFSCREEN HTML LOADED ===');
+  </script>
+  <script src="offscreen.js"></script>
+  <script>
+    console.log('=== OFFSCREEN JS SCRIPT TAG EXECUTED ===');
+  </script>
 </body>
 </html>

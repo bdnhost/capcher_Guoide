@@ -196,6 +196,10 @@ async function startRecordingProcess(streamId, sendResponse) {
     const settings = await chrome.storage.local.get(['videoQuality', 'audioSource']);
     logger.debug("Settings loaded:", settings);
 
+    // CRITICAL: Wait for offscreen document to fully load before sending message
+    logger.debug("Waiting for offscreen document to load...");
+    await new Promise(resolve => setTimeout(resolve, 300));
+
     // Send message to offscreen to start recording
     logger.debug("Sending START_RECORDING message to offscreen");
     chrome.runtime.sendMessage({

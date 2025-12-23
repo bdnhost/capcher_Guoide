@@ -1,16 +1,23 @@
 // offscreen.js
 // Handles MediaRecorder for Manifest V3
 
-console.log('Offscreen script loaded');
+console.log('========================================');
+console.log('=== OFFSCREEN.JS LOADED AND RUNNING ===');
+console.log('========================================');
 
 let recorder = null;
 let data = [];
 let currentStream = null;
 
 chrome.runtime.onMessage.addListener((message) => {
-  if (message.target !== "offscreen") return;
+  console.log('>>> Offscreen received ANY message:', message);
 
-  console.log('Offscreen received message:', message.type);
+  if (message.target !== "offscreen") {
+    console.log('>>> Message target is not offscreen, ignoring:', message.target);
+    return;
+  }
+
+  console.log('>>> Offscreen received TARGETED message:', message.type);
 
   if (message.type === "START_RECORDING") {
     startRecording(message.streamId, message.settings);
