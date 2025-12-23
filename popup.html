@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html dir="rtl">
+
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+  <div class="app-container">
+    <header>
+      <div class="logo-area">
+        <span class="logo-icon">✨</span>
+        <h1>AI Recorder <span>Pro</span></h1>
+      </div>
+      <button id="settings" class="icon-button" title="הגדרות">
+        <span class="icon">⚙️</span>
+      </button>
+    </header>
+
+    <main>
+      <section class="recording-section">
+        <div class="timer-display" id="timer">00:00:00</div>
+
+        <div class="goal-group" id="goal-container" style="margin-top: 15px;">
+          <input type="text" id="recording-goal" placeholder="מה בכוונתך להקליט? (למשל: מדריך לשימוש ב-Gmail)"
+            style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: white; padding: 10px; border-radius: 8px; font-size: 12px; outline: none;">
+        </div>
+
+        <div class="main-controls">
+          <button id="start" class="btn btn-primary btn-lg">
+            <span class="icon">⏺️</span>
+            <span>הקלט מסך</span>
+          </button>
+
+          <button id="stop" class="btn btn-danger btn-lg" disabled style="display: none;">
+            <span class="icon">⏹️</span>
+            <span>עצור</span>
+          </button>
+
+          <button id="pause" class="btn btn-secondary btn-lg" disabled style="display: none;">
+            <span class="icon">⏸️</span>
+            <span>השהה</span>
+          </button>
+        </div>
+
+        <div id="status" class="status-indicator idle">
+          <span class="pulse"></span>
+          <span class="status-text">מוכן להקלטה</span>
+        </div>
+      </section>
+
+      <section class="tools-section">
+        <h2 class="section-label">כלי ציור</h2>
+        <div class="tools-grid">
+          <button id="cursor" class="tool-btn" title="סמן (Esc)">
+            <span class="icon">🖱️</span>
+          </button>
+          <button id="pen" class="tool-btn active" title="עט (P)">
+            <span class="icon">✏️</span>
+          </button>
+          <button id="highlighter" class="tool-btn" title="מרקר (H)">
+            <span class="icon">🖍️</span>
+          </button>
+          <button id="circle" class="tool-btn" title="עיגול (C)">
+            <span class="icon">⭕</span>
+          </button>
+          <button id="rectangle" class="tool-btn" title="מלבן (R)">
+            <span class="icon">⬜</span>
+          </button>
+          <button id="arrow" class="tool-btn" title="חץ (A)">
+            <span class="icon">➡️</span>
+          </button>
+          <button id="text" class="tool-btn" title="טקסט (T)">
+            <span class="icon">🔤</span>
+          </button>
+        </div>
+
+        <div class="style-controls">
+          <div class="control-group">
+            <label>צבע</label>
+            <div class="color-picker-wrapper">
+              <input type="color" id="colorPicker" value="#FFEB3B">
+            </div>
+          </div>
+          <div class="control-group grow">
+            <div class="label-row">
+              <label>עובי קו</label>
+              <span id="lineWidthValue">4px</span>
+            </div>
+            <input type="range" id="lineWidth" min="1" max="20" value="4" class="modern-slider">
+          </div>
+        </div>
+      </section>
+
+      <section class="canvas-controls">
+        <button id="undo" class="btn btn-ghost" title="ביטול (Ctrl+Z)">
+          <span class="icon">↩️</span>
+          <span>ביטול</span>
+        </button>
+        <button id="redo" class="btn btn-ghost" title="ביצוע מחדש (Ctrl+Y)">
+          <span class="icon">↪️</span>
+          <span>שחזור</span>
+        </button>
+        <button id="clear" class="btn btn-ghost text-danger" title="נקה קנבס">
+          <span class="icon">🗑️</span>
+          <span>נקה הכל</span>
+        </button>
+      </section>
+    </main>
+
+    <footer>
+      <p>מופעל ע"י DeepSeek AI</p>
+    </footer>
+  </div>
+
+  <script src="logger.js"></script>
+  <script src="popup.js"></script>
+</body>
+
+</html>
